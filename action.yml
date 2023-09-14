@@ -1,0 +1,94 @@
+name: CYF PR Manager
+description: Manages PRs for CYF - checks formatting, adds labels, etc.
+inputs:
+  pr_title:
+    description: Title of the PR. Set to template-expand github.event.pull_request.title.
+    required: true
+  pr_body:
+    description: Body of the PR. Set to template-expand github.event.pull_request.body.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@v6
+      env:
+        # Round-trip these values through an env vars to avoid code injection.
+        # Otherwise, the title gets pasted raw into the script context and can be interpreted as code.
+        PR_TITLE: ${{ inputs.pr_title }}
+        PR_BODY: ${{ inputs.pr_body }}
+      with:
+        script: |
+          // The entrypoint is highlighted below; first we have a bunch of helper functions.
+
+          async function fail(message) {
+            const messageWithPrefix = `⚠️ ${message}\n\nIf this PR is not trainee coursework, please add #NotTraineeCoursework to its description.`;
+            console.log(messageWithPrefix);
+
+            let r = await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: messageWithPrefix,
+            });
+
+            // TODO: Mark the PR as a draft.
+            // I have yet to find any kind of permissions scope for any token which allows this call.
+            // await exec.exec("gh api graphql -F id=${{ github.event.pull_request.node_id }} -f query=\"mutation($id: ID!) { convertPullRequestToDraft(input: { pullRequestId: $id }) { pullRequest { id number isDraft } } }\"");
+
+            process.exit(1);
+          }
+
+          async function splitClass(className) {
+            let lastLetterPosition = className.length - 1;
+            for (; lastLetterPosition >= 0; --lastLetterPosition) {
+              if (className[lastLetterPosition] < "0" || className[lastLetterPosition] > "9") {
+                break;
+              }
+            }
+            const firstNumberPosition = lastLetterPosition + 1;
+            if (lastLetterPosition < 0 || firstNumberPosition >= className.length) {
+              await fail(`Failed to parse class ${className} from PR title`);
+            }
+            return [className.substring(0, firstNumberPosition).trim(), className.substring(firstNumberPosition)];
+          }
+
+          // Ideally there would be a centralised data-source for cities and/or classes.
+          // Map of lower-case things-we-see-before-numbers when describing classes in PR titles.
+          // Whitespace between the prefix and the class number are optional.
+          const knownCities = {
+            "glasgow": "Glasgow",
+            "london": "London",
+            "ldn": "London",
+            "lnd": "London",
+            "north west": "NW",
+            "northwest": "NW",
+            "nw": "NW",
+            "west midlands": "WM",
+            "wm": "WM",
+          };
+
+          ///////////////////////////////////////////////////////////////
+          ////////////////// Entry-point starts here ////////////////////
+          ///////////////////////////////////////////////////////////////
+
+          if (process.env.PR_BODY.toLowerCase().includes("#nottraineecoursework")) {
+            console.log("Found #NotTraineeCoursework in description - not running action.");
+            process.exit(0);
+          }
+
+          const parts = process.env.PR_TITLE.split(" | ");
+          if (parts.length !== 4) {
+            await fail("PR title is in the wrong format.\nExpected format was 'COHORT_NAME | FIRST_NAME LAST_NAME | REPO_NAME | WEEK'\ne.g. 'London 1 | Sally McGrath | Module-JS1 | Week 1'");
+          }
+          const className = parts[0];
+          const [cityComponent, classNumber] = await splitClass(className);
+          if (!Object.keys(knownCities).includes(cityComponent.toLowerCase())) {
+            await fail(`PR title is in the wrong format.\nExpected first part to be a class identifier, but didn't recognise ${className}`);
+          }
+          const knownCity = knownCities[cityComponent.toLowerCase()];
+          await github.rest.issues.addLabels({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            labels: [`${knownCity}${classNumber}`],
+          });
